@@ -16,16 +16,17 @@ module Main (main) where
 -- D = draw
 
 import Prelude hiding (catch)
+import Control.Applicative ((<$>))
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad (forM, forM_, liftM, when)
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State.Lazy
+import Data.Char (isSpace)
 import Data.List (intersperse, isPrefixOf, sortBy, groupBy, delete)
 import qualified Data.Map as M
 import Data.Maybe
--- import Data.Ord (comparing)
 import Data.Ratio
 import Data.Typeable
 import System.Directory
@@ -181,15 +182,61 @@ getScore
 
 listToTrio (x:y:z:_) = (x, y, z)
 
-readDriverConfig = return DC {
-        dcRefEngine = "J:\\Barbarossa\\dist\\build\\Barbarossa\\Barbarossa_0_01_k3nmd.exe",
-        dcRefArgs   = "-l5",
-        dcChaEngine = "J:\\Barbarossa\\dist\\build\\Barbarossa\\Barbarossa_0_01_next55ptk.exe",
-        dcChaArgs   = "-l2",
-        -- dcChaConfig = "J:\\AbaAba\\dist\\build\\Abulafia\\test1-51-6.txt",
-        -- dcRefMoves = "40", dcRefFixTm = "20", dcRefSecPerMv = "0.2",	-- time for reference
-        -- dcChaMoves = "40", dcChaFixTm = "20", dcChaSecPerMv = "0.2",	-- time for challenger
-        dcRefMoves = "40", dcRefFixTm = "120", dcRefSecPerMv = "1",	-- time for reference
-        dcChaMoves = "40", dcChaFixTm = "120", dcChaSecPerMv = "1",	-- time for challenger
-        dcRefProto = "uci", dcChaProto = "uci"	-- protocols (uci/)
-     }
+readDriverConfig = stringToConfig <$> readFile "ClopDriver.txt"
+
+stringToConfig :: String -> DriverConfig
+stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
+                       . catMaybes . map readParam . noComments . lines
+    where defDC = DC {
+              dcRefEngine = "J:\\Barbarossa\\dist\\build\\Barbarossa\\Barbarossa_0_01_k3nmd.exe",
+              dcRefArgs   = "-l5",
+              dcChaEngine = "J:\\Barbarossa\\dist\\build\\Barbarossa\\Barbarossa_0_01_castp.exe",
+              dcChaArgs   = "-l2",
+              -- dcChaConfig = "J:\\AbaAba\\dist\\build\\Abulafia\\test1-51-6.txt",
+              -- dcRefMoves = "40", dcRefFixTm = "20", dcRefSecPerMv = "0.2",
+              -- dcChaMoves = "40", dcChaFixTm = "20", dcChaSecPerMv = "0.2",
+              dcRefMoves = "40", dcRefFixTm = "120", dcRefSecPerMv = "1",
+              dcChaMoves = "40", dcChaFixTm = "120", dcChaSecPerMv = "1",
+              dcRefProto = "uci", dcChaProto = "uci"
+          }
+          setRefEngine   s dc = dc { dcRefEngine   = s }
+          setRefArgs     s dc = dc { dcRefArgs     = s }
+          setRefMoves    s dc = dc { dcRefMoves    = s }
+          setRefFixTm    s dc = dc { dcRefFixTm    = s }
+          setRefSecPerMv s dc = dc { dcRefSecPerMv = s }
+          setRefProto    s dc = dc { dcRefProto    = s }
+          setChaEngine   s dc = dc { dcChaEngine   = s }
+          setChaArgs     s dc = dc { dcChaArgs     = s }
+          setChaMoves    s dc = dc { dcChaMoves    = s }
+          setChaFixTm    s dc = dc { dcChaFixTm    = s }
+          setChaSecPerMv s dc = dc { dcChaSecPerMv = s }
+          setChaProto    s dc = dc { dcChaProto    = s }
+          funlist = [ ("RefEngine",   setRefEngine),
+                      ("RefArgs",     setRefArgs),
+                      ("RefMoves",    setRefMoves),
+                      ("RefFixTm",    setRefFixTm),
+                      ("RefSecPerMv", setRefSecPerMv),
+                      ("RefProto",    setRefProto),
+                      ("ChaEngine",   setChaEngine),
+                      ("ChaArgs",     setChaArgs),
+                      ("ChaMoves",    setChaMoves),
+                      ("ChaFixTm",    setChaFixTm),
+                      ("ChaSecPerMv", setChaSecPerMv),
+                      ("ChaProto",    setChaProto) ]
+          noComments = filter (not . isComment)
+          isComment ""                 = True
+          isComment ('-':'-':_)        = True
+          isComment (c:cs) | isSpace c = isComment cs
+          isComment _                  = False
+
+type Setter a = String -> a -> a
+
+lookApply :: String -> String -> a -> [(String, Setter a)] -> a
+lookApply s v a = maybe a (($ a) . ($ v)) . lookup s
+
+readParam :: String -> Maybe (String, String)
+readParam s = let (ns, vs) = span (/= '=') s
+              in case vs of
+                     ('=' : rs) -> Just (strip ns, strip rs)
+                     _          -> Nothing	-- did not contain '='
+    where strip = filter (not . isSpace)
