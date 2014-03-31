@@ -14,32 +14,28 @@ module Main (main) where
 -- W = win
 -- L = loss
 -- D = draw
+-- It can run real games through cutechess-cli or pseudo-games by the analysis function
+-- of the newer versions of Barbarossa, running analysis on a specified number of
+-- random positions from the analysis file and comparing the results
 
 import Prelude hiding (catch)
 import Control.Applicative ((<$>))
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
-import Control.Monad (forM, forM_, liftM, when)
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.State.Lazy
+import Data.Array.IArray
+import qualified Data.ByteString.Lazy.Char8 as B
 import Data.Char (isSpace)
 import Data.List (intersperse, isPrefixOf, sortBy, groupBy, delete)
 import qualified Data.Map as M
 import Data.Maybe
-import Data.Ratio
-import Data.Typeable
 import System.Directory
 import System.Environment (getArgs)
 import System.FilePath
 import System.IO
 import System.IO.Error hiding (catch)
 import System.Process
-import System.Time
-import System.Timeout (timeout)
-import System.Locale (defaultTimeLocale)
 import System.Random
-import Text.Printf
 
 data DriverConfig = DC {
         dcRefEngine :: String,		-- reference engine
@@ -50,7 +46,9 @@ data DriverConfig = DC {
         dcChaMoves, dcChaFixTm, dcChaSecPerMv :: String,	-- time for challenger
         -- dcRefUci :: String,	-- uci command for reference engine
         -- dcChaUci :: String,	-- uci command for learning engine
-        dcRefProto, dcChaProto :: String	-- protocols (uci/)
+        dcRefProto, dcChaProto :: String,	-- protocols (uci/)
+        dcAnlFile   :: String,	-- path of the analysis file
+        dcAnlCount  :: Int	-- number of random positions to analyse
      }
 
 -- Some constants for the evolving environment
@@ -84,36 +82,66 @@ makeDict ss = go Nothing ss []
 
 -- Read a configuration file for the CLOP learn session
 -- prepare the environment (i.e. config file, log files, pgn file names)
--- and start a game using cutechess-cli
+-- If the analysis parameters are defined, then start in analysis moder
+-- otherwise start a game using cutechess-cli
 -- The leaning engine must understand at least the option -p par=val,...
 -- Other options can be given in the session config
 runGame :: String -> String -> String -> [(String, Double)] -> IO String
 runGame session thread seed dict = do
     setCurrentDirectory $ baseDir session
     cdconf <- readDriverConfig
-    let white = last seed `elem` "13579"
-        (args, refdir, chadir) = mkCutechessCommand cdconf session thread white dict
-    createDirectoryIfMissing True refdir
-    createDirectoryIfMissing True chadir
-    wbd <- oneMatch args
-    case wbd of
-        (1, 0, 0) -> if white then return "W" else return "L"
-        (0, 1, 0) -> if white then return "L" else return "W"
-        _         -> return "D"
+    let base = baseDir session
+    (refcurr, chacurr) <- makeDirs base thread
+    if dcAnlFile cdconf /= "" && dcAnlCount cdconf /= 0
+       then do
+           afile <- makeAnlFile cdconf chacurr
+           analysisMode cdconf afile refcurr chacurr dict
+       else do
+           let white = last seed `elem` "13579"
+               args  = mkCutechessCommand cdconf base refcurr chacurr
+                           session thread white dict
+           wdl <- oneMatch args
+           case wdl of
+               (1, 0, 0) -> if white then return "W" else return "L"
+               (0, 1, 0) -> if white then return "L" else return "W"
+               _         -> return "D"
 
 baseDir :: String -> FilePath
 baseDir session = learnDir </> session
 
--- Give names to the candidates
-nameCandidates evn cycle = zip (map label [1..])
-    where label i = evn ++ "-" ++ show cycle ++ "-" ++ show i ++ ".txt"
+-- Name and make current directories for reference and candidate
+makeDirs :: FilePath -> String -> IO (String, String)
+makeDirs base thread = do
+    let refcurr = base </> ("ref" ++ thread)
+        chacurr = base </> ("cha" ++ thread)
+    createDirectoryIfMissing True refcurr
+    createDirectoryIfMissing True chacurr
+    return (refcurr, chacurr)
+
+makeAnlFile :: DriverConfig -> FilePath -> IO FilePath
+makeAnlFile dcf adir = do
+    -- putStrLn $ "Making analysis file in " ++ adir
+    -- putStrLn $ "Input file: " ++ dcAnlFile dcf
+    alfs <- B.lines <$> B.readFile (dcAnlFile dcf)
+    let (pre:rest) = alfs
+        nl = length rest
+        ar = listArray (0, nl-1) rest :: Array Int B.ByteString
+        nafl = adir </> "anlfile.txt"
+    -- putStrLn $ "Input recs: " ++ show (nl + 1)
+    -- putStrLn $ "Preambel: " ++ B.unpack pre
+    -- putStrLn $ "Output file: " ++ nafl
+    -- putStrLn $ "Output recs: " ++ show (dcAnlCount dcf)
+    g <- getStdGen
+    ho <- openFile nafl WriteMode
+    B.hPutStrLn ho pre
+    mapM_ (B.hPutStrLn ho) $ map (ar!) . map (`mod` nl) $ take (dcAnlCount dcf) $ randoms g
+    hClose ho
+    return nafl
 
 -- Return a list of parameters for the cutechess-cli command
--- and the 2 directories in which the engines run
-mkCutechessCommand :: DriverConfig -> String -> String -> Bool -> [(String,Double)]
-                   -> ([String], FilePath, FilePath)
-mkCutechessCommand dcf session thread white dict
-    = (args, refcurr, chacurr)
+mkCutechessCommand :: DriverConfig -> FilePath -> FilePath -> FilePath
+    -> String -> String -> Bool -> [(String,Double)] -> [String]
+mkCutechessCommand dcf base refcurr chacurr session thread white dict = args
     where common = [
               "-site", "Sixpack",
               "-event", session,
@@ -129,7 +157,7 @@ mkCutechessCommand dcf session thread white dict
               "proto=" ++ dcChaProto dcf,
               "tc=" ++ chatime
               ] ++ map (\(n,v) -> "arg=-p" ++ n ++ "=" ++ show v) dict
-                ++ optArgs dcChaArgs
+                ++ optArgs dcf dcChaArgs
           eng2 = [	-- the reference engine
               "-engine",
               "name=" ++ takeFileName (dcRefEngine dcf),
@@ -137,15 +165,11 @@ mkCutechessCommand dcf session thread white dict
               "dir=" ++ refcurr,
               "proto=" ++ dcRefProto dcf,
               "tc=" ++ reftime
-              ] ++ optArgs dcRefArgs
+              ] ++ optArgs dcf dcRefArgs
           args = if white then common ++ eng1 ++ eng2 else common ++ eng2 ++ eng1
           pgnout = base </> ("thr" ++ thread ++ ".pgn")
-          refcurr = base </> ("ref" ++ thread)
           reftime = "tc=" ++ dcRefMoves dcf ++ "/" ++ dcRefFixTm dcf ++ "+" ++ dcRefSecPerMv dcf
-          chacurr = base </> ("cha" ++ thread)
           chatime = "tc=" ++ dcChaMoves dcf ++ "/" ++ dcChaFixTm dcf ++ "+" ++ dcChaSecPerMv dcf
-          base = baseDir session
-          optArgs f = if null (f dcf) then [] else map (\w -> "arg=" ++ w) (words $ f dcf)
 
 oneMatch :: [String] -> IO (Int, Int, Int)
 oneMatch args = do
@@ -182,6 +206,57 @@ getScore
 
 listToTrio (x:y:z:_) = (x, y, z)
 
+-- Return a lists of parameters for the 2 engine runs
+analysisMode :: DriverConfig -> FilePath -> FilePath -> FilePath -> [(String,Double)] -> IO String
+analysisMode dcf afile refcurr chacurr dict = do
+    r1 <- async $ oneProc eng1 opt1 chacurr
+    r2 <- async $ oneProc eng2 opt2 refcurr
+    (e1, n1) <- wait r1
+    (e2, n2) <- wait r2
+    let e1r :: Double
+        e1r = fromIntegral e1 / fromIntegral n1
+        e2r :: Double
+        e2r = fromIntegral e2 / fromIntegral n2
+    if e1r == e2r
+       then return "D"
+       else if e1r > e2r
+            then return "L"
+            else return "W"
+    where eng1 = dcChaEngine dcf
+          opt1 = map (\(n,v) -> "-p " ++ n ++ "=" ++ show v) dict
+                     ++ words (dcChaArgs dcf)
+                     ++ ["-a", afile]
+          eng2 = dcRefEngine dcf
+          opt2 = words (dcRefArgs dcf)
+                     ++ ["-a", afile]
+
+oneProc :: String -> [String] -> FilePath -> IO (Integer, Int)
+oneProc engine opts dir = do
+    -- putStrLn $ "Starting engine " ++ engine
+    -- putStrLn $ "with options " ++ unwords opts
+    (hin, hout, _, ph)
+         <- runInteractiveProcess engine opts (Just dir) Nothing
+    hSetBuffering hout LineBuffering
+    -- putStrLn "After buffering..."
+    line <- lineUntil ("Agreg " `isPrefixOf`) hout
+    let ers1 = toNextVal line
+        (ers, rest) = break (==',') ers1
+        fens1 = toNextVal rest
+        (fens, _)   = break (==',') fens1
+    -- putStrLn $ engine ++ ": done, with " ++ ers ++ " / " ++ fens
+    return (read ers, read fens)
+
+toNextVal = tail . dropWhile (/= '=')
+
+lineUntil :: (String -> Bool) -> Handle -> IO String
+lineUntil p h = do
+    l <- hGetLine h
+    -- putStrLn l
+    if p l then return l
+           else lineUntil p h
+
+optArgs dcf f = if null (f dcf) then [] else map (\w -> "arg=" ++ w) (words $ f dcf)
+
 readDriverConfig = stringToConfig <$> readFile "ClopDriver.txt"
 
 stringToConfig :: String -> DriverConfig
@@ -197,7 +272,9 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
               -- dcChaMoves = "40", dcChaFixTm = "20", dcChaSecPerMv = "0.2",
               dcRefMoves = "40", dcRefFixTm = "120", dcRefSecPerMv = "1",
               dcChaMoves = "40", dcChaFixTm = "120", dcChaSecPerMv = "1",
-              dcRefProto = "uci", dcChaProto = "uci"
+              dcRefProto = "uci", dcChaProto = "uci",
+              dcAnlFile  = "",	-- when those are both defined (/="" and /=0)
+              dcAnlCount = 0	-- then the analysis version of the "game" is performed
           }
           setRefEngine   s dc = dc { dcRefEngine   = s }
           setRefArgs     s dc = dc { dcRefArgs     = s }
@@ -211,6 +288,8 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
           setChaFixTm    s dc = dc { dcChaFixTm    = s }
           setChaSecPerMv s dc = dc { dcChaSecPerMv = s }
           setChaProto    s dc = dc { dcChaProto    = s }
+          setAnlFile     s dc = dc { dcAnlFile     = s }
+          setAnlCount    s dc = dc { dcAnlCount    = read s }
           funlist = [ ("RefEngine",   setRefEngine),
                       ("RefArgs",     setRefArgs),
                       ("RefMoves",    setRefMoves),
@@ -222,7 +301,9 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
                       ("ChaMoves",    setChaMoves),
                       ("ChaFixTm",    setChaFixTm),
                       ("ChaSecPerMv", setChaSecPerMv),
-                      ("ChaProto",    setChaProto) ]
+                      ("ChaProto",    setChaProto),
+                      ("AnlFile",     setAnlFile),
+                      ("AnlCount",    setAnlCount) ]
           noComments = filter (not . isComment)
           isComment ""                 = True
           isComment ('-':'-':_)        = True
