@@ -238,7 +238,12 @@ oneProc engine opts dir = do
          <- runInteractiveProcess engine opts (Just dir) Nothing
     hSetBuffering hout LineBuffering
     -- putStrLn "After buffering..."
-    line <- lineUntil ("Agreg " `isPrefixOf`) hout
+    line <- do
+        let action = lineUntil ("Agreg " `isPrefixOf`) hout
+        et <- try action :: IO (Either IOError String)
+        case et of
+            Left _  -> return "Agreg {agrCumErr = 1, agrFenOk = 1, agrFenNOk = 0}"	-- dirty trick here to overcome the EOF error
+            Right l -> return l
     let ers1 = toNextVal line
         (ers, rest) = break (==',') ers1
         fens1 = toNextVal rest
