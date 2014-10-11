@@ -44,6 +44,7 @@ data DriverConfig = DC {
         dcChaArgs   :: String,	-- learning engine arguments
         dcRefMoves, dcRefFixTm, dcRefSecPerMv :: String,	-- time for reference
         dcChaMoves, dcChaFixTm, dcChaSecPerMv :: String,	-- time for challenger
+        dcRefDepth, dcChaDepth :: Int,	-- depth for reference and challengen engines
         -- dcRefUci :: String,	-- uci command for reference engine
         -- dcChaUci :: String,	-- uci command for learning engine
         dcRefProto, dcChaProto :: String,	-- protocols (uci/)
@@ -154,22 +155,29 @@ mkCutechessCommand dcf base refcurr chacurr session thread white dict = args
               "name=" ++ takeFileName (dcChaEngine dcf),
               "cmd=" ++ dcChaEngine dcf,
               "dir=" ++ chacurr,
-              "proto=" ++ dcChaProto dcf,
-              "tc=" ++ chatime
-              ] ++ map (\(n,v) -> "arg=-p" ++ n ++ "=" ++ show v) dict
+              "proto=" ++ dcChaProto dcf
+              ] ++ words chatime
+                ++ map (\(n,v) -> "arg=-p" ++ n ++ "=" ++ show v) dict
                 ++ optArgs dcf dcChaArgs
           eng2 = [	-- the reference engine
               "-engine",
               "name=" ++ takeFileName (dcRefEngine dcf),
               "cmd=" ++ dcRefEngine dcf,
               "dir=" ++ refcurr,
-              "proto=" ++ dcRefProto dcf,
-              "tc=" ++ reftime
-              ] ++ optArgs dcf dcRefArgs
+              "proto=" ++ dcRefProto dcf
+              ] ++ words reftime
+                ++ optArgs dcf dcRefArgs
           args = if white then common ++ eng1 ++ eng2 else common ++ eng2 ++ eng1
           pgnout = base </> ("thr" ++ thread ++ ".pgn")
-          reftime = "tc=" ++ dcRefMoves dcf ++ "/" ++ dcRefFixTm dcf ++ "+" ++ dcRefSecPerMv dcf
-          chatime = "tc=" ++ dcChaMoves dcf ++ "/" ++ dcChaFixTm dcf ++ "+" ++ dcChaSecPerMv dcf
+          -- When we give depth, this has priority and no time control is requested
+          chatime | dcChaDepth dcf /= 0   = "tc=inf depth=" ++ show (dcChaDepth dcf)
+                  | null (dcChaMoves dcf) = "tc=" ++ dcChaFixTm dcf ++ "+" ++ dcChaSecPerMv dcf
+                  | otherwise             = "tc=" ++ dcChaMoves dcf ++ "/"
+                                               ++ dcChaFixTm dcf ++ "+" ++ dcChaSecPerMv dcf
+          reftime | dcRefDepth dcf /= 0   = "tc=inf depth=" ++ show (dcRefDepth dcf)
+                  | null (dcRefMoves dcf) = "tc=" ++ dcRefFixTm dcf ++ "+" ++ dcRefSecPerMv dcf
+                  | otherwise             = "tc=" ++ dcRefMoves dcf ++ "/"
+                                               ++ dcRefFixTm dcf ++ "+" ++ dcRefSecPerMv dcf
 
 oneMatch :: [String] -> IO (Int, Int, Int)
 oneMatch args = do
@@ -275,8 +283,10 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
               -- dcChaConfig = "J:\\AbaAba\\dist\\build\\Abulafia\\test1-51-6.txt",
               -- dcRefMoves = "40", dcRefFixTm = "20", dcRefSecPerMv = "0.2",
               -- dcChaMoves = "40", dcChaFixTm = "20", dcChaSecPerMv = "0.2",
-              dcRefMoves = "40", dcRefFixTm = "120", dcRefSecPerMv = "1",
-              dcChaMoves = "40", dcChaFixTm = "120", dcChaSecPerMv = "1",
+              dcRefDepth = 0,
+              dcChaDepth = 0,
+              dcRefMoves = "", dcRefFixTm = "120", dcRefSecPerMv = "1",
+              dcChaMoves = "", dcChaFixTm = "120", dcChaSecPerMv = "1",
               dcRefProto = "uci", dcChaProto = "uci",
               dcAnlFile  = "",	-- when those are both defined (/="" and /=0)
               dcAnlCount = 0	-- then the analysis version of the "game" is performed
@@ -286,12 +296,14 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
           setRefMoves    s dc = dc { dcRefMoves    = s }
           setRefFixTm    s dc = dc { dcRefFixTm    = s }
           setRefSecPerMv s dc = dc { dcRefSecPerMv = s }
+          setRefDepth    s dc = dc { dcRefDepth    = read s }
           setRefProto    s dc = dc { dcRefProto    = s }
           setChaEngine   s dc = dc { dcChaEngine   = s }
           setChaArgs     s dc = dc { dcChaArgs     = s }
           setChaMoves    s dc = dc { dcChaMoves    = s }
           setChaFixTm    s dc = dc { dcChaFixTm    = s }
           setChaSecPerMv s dc = dc { dcChaSecPerMv = s }
+          setChaDepth    s dc = dc { dcChaDepth    = read s }
           setChaProto    s dc = dc { dcChaProto    = s }
           setAnlFile     s dc = dc { dcAnlFile     = s }
           setAnlCount    s dc = dc { dcAnlCount    = read s }
@@ -299,12 +311,14 @@ stringToConfig = foldr (\(n, s) dc -> lookApply n s dc funlist) defDC
                       ("RefArgs",     setRefArgs),
                       ("RefMoves",    setRefMoves),
                       ("RefFixTm",    setRefFixTm),
+                      ("RefDepth",    setRefDepth),
                       ("RefSecPerMv", setRefSecPerMv),
                       ("RefProto",    setRefProto),
                       ("ChaEngine",   setChaEngine),
                       ("ChaArgs",     setChaArgs),
                       ("ChaMoves",    setChaMoves),
                       ("ChaFixTm",    setChaFixTm),
+                      ("ChaDepth",    setChaDepth),
                       ("ChaSecPerMv", setChaSecPerMv),
                       ("ChaProto",    setChaProto),
                       ("AnlFile",     setAnlFile),
